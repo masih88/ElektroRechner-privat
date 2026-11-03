@@ -1,0 +1,299 @@
+// elcalc – command line front end for the calculation core.
+//   elcalc list                         all calculators and tables
+//   elcalc show <id>                    inputs, outputs and formulas
+//   elcalc run <id> [key=value ...]     calculate (missing inputs use defaults)
+//   elcalc table <id>                   print a reference table
+//   elcalc sheet <list> [file] [--detail]  compute a project list from a CSV/TSV file (or stdin, "-")
+//                                       and print it as CSV; without file a one-row demo
+//   elcalc markdown                     Markdown reference of everything (docs/BERECHNUNGEN.md)
+// Options: --lang de|en  --norm de|ch  --currency eur|chf  --rate <CHF per €>
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "elc/lists.hpp"
+#include "elc/registry.hpp"
+
+namespace {
+
+using namespace elc;
+
+struct Options {
+    Lang lang = Lang::De;
+    NormProfile norm = NormProfile::DE;
+    std::optional<Currency> currency;
+    double rate = 0.92;
+    bool detail = false;
+    std::vector<std::string> args;
+};
+
+Options parse(std::span<char*> argv) {
+    Options o;
+    for (std::size_t i = 1; i < argv.size(); ++i) {
+        const std::string_view a = argv[i];
+        if (a == "--lang" && i + 1 < argv.size()) {
+            o.lang = std::string_view(argv[++i]) == "en" ? Lang::En : Lang::De;
+        } else if (a == "--norm" && i + 1 < argv.size()) {
+            o.norm = std::string_view(argv[++i]) == "ch" ? NormProfile::CH : NormProfile::DE;
+        } else if (a == "--currency" && i + 1 < argv.size()) {
+            o.currency = std::string_view(argv[++i]) == "chf" ? Currency::CHF : Currency::EUR;
+        } else if (a == "--rate" && i + 1 < argv.size()) {
+            o.rate = parseNumber(argv[++i]).value_or(o.rate);
+        } else if (a == "--detail") {
+            o.detail = true;
+        } else {
+            o.args.emplace_back(a);
+        }
+    }
+    return o;
+}
+
+Context context(const Options& o) {
+    Context c;
+    c.norm = o.norm;
+    c.currency = o.currency.value_or(o.norm == NormProfile::CH ? Currency::CHF : Currency::EUR);
+    c.chfPerEur = o.rate;
+    return c;
+}
+
+const char* severityTag(Severity s) {
+    switch (s) {
+        case Severity::Ok: return "[OK]  ";
+        case Severity::Warning: return "[WARN]";
+        case Severity::Error: return "[FEHLER/ERROR]";
+        case Severity::Info: break;
+    }
+    return "[INFO]";
+}
+
+int list(const Options& o) {
+    const auto row = [&](const std::string& id, const Text& title) {
+        std::cout << "  " << std::left << std::setw(28) << id << title.in(o.lang) << '\n';
+    };
+    for (const auto& cat : categories()) {
+        std::cout << "\n== " << cat.title.in(o.lang) << " ==\n";
+        for (const auto& g : categoryGroups(cat.id)) {
+            if (!g.title.de.empty()) std::cout << " -- " << g.title.in(o.lang) << '\n';
+            for (const auto& id : g.items) {
+                if (const auto* l = findList(id)) row(l->id, l->title);
+                else if (const auto* c = findCalculator(id)) row(c->id, c->title);
+                else if (const auto* t = findTable(id)) row(t->id, t->title);
+            }
+        }
+    }
+    return 0;
+}
+
+int show(const Options& o, const std::string& id) {
+    const auto* c = findCalculator(id);
+    if (!c) {
+        std::cerr << "Unbekannt / unknown: " << id << '\n';
+        return 2;
+    }
+    std::cout << c->title.in(o.lang) << "\n\n" << c->description.in(o.lang) << "\n\nInputs:\n";
+    for (const auto& in : c->inputs) {
+        std::cout << "  " << std::left << std::setw(10) << in.id << in.label.in(o.lang);
+        if (!in.unit.empty()) std::cout << " [" << in.unit << ']';
+        if (in.kind == InputDef::Kind::Choice) {
+            std::cout << "  {";
+            for (std::size_t i = 0; i < in.options.size(); ++i) std::cout << (i ? ", " : "") << in.options[i].value;
+            std::cout << "} default " << in.defaultChoice;
+        } else if (std::isfinite(in.defaultValue)) {
+            std::cout << "  default " << formatNumber(in.defaultValue, 6, Lang::En);
+        }
+        std::cout << '\n';
+    }
+    std::cout << "\nOutputs:\n";
+    for (const auto& out : c->outputs) std::cout << "  " << std::left << std::setw(10) << out.id << out.label.in(o.lang) << '\n';
+    return 0;
+}
+
+int run(const Options& o, const std::string& id) {
+    const auto* c = findCalculator(id);
+    if (!c) {
+        std::cerr << "Unbekannt / unknown: " << id << '\n';
+        return 2;
+    }
+    auto in = defaultInputs(*c);
+    for (std::size_t i = 2; i < o.args.size(); ++i) {
+        const auto& kv = o.args[i];
+        const auto eq = kv.find('=');
+        if (eq == std::string::npos) continue;
+        const auto key = kv.substr(0, eq);
+        const auto val = kv.substr(eq + 1);
+        const auto def = std::find_if(c->inputs.begin(), c->inputs.end(), [&](const InputDef& d) { return d.id == key; });
+        if (def == c->inputs.end()) {
+            std::cerr << "Unbekannter Parameter / unknown input: " << key << '\n';
+            return 2;
+        }
+        if (def->kind != InputDef::Kind::Number) {
+            in.setChoice(key, val);
+        } else {
+            in.set(key, parseNumber(val).value_or(kNaN));
+        }
+    }
+    const auto r = evaluate(*c, in, context(o));
+    std::cout << c->title.in(o.lang) << '\n';
+    for (const auto& out : c->outputs) {
+        std::string text;
+        if (out.isText) {
+            const auto it = r.texts.find(out.id);
+            if (it == r.texts.end()) continue;
+            text = it->second.in(o.lang);
+        } else {
+            const auto it = r.values.find(out.id);
+            if (it == r.values.end()) continue;
+            const auto unit = r.units.contains(out.id) ? r.units.at(out.id) : out.unit;
+            text = formatNumber(it->second, out.decimals, o.lang) + (unit.empty() ? "" : " " + unit);
+            if (const auto alt = r.alt.find(out.id); alt != r.alt.end()) text += "  (" + alt->second.in(o.lang) + ")";
+        }
+        std::cout << "  " << std::left << std::setw(42) << out.label.in(o.lang) << text << '\n';
+    }
+    for (const auto& m : r.messages) std::cout << severityTag(m.severity) << ' ' << m.text.in(o.lang) << '\n';
+    return r.hasError() ? 1 : 0;
+}
+
+int table(const Options& o, const std::string& id) {
+    const auto* t = findTable(id);
+    if (!t) {
+        std::cerr << "Unbekannt / unknown: " << id << '\n';
+        return 2;
+    }
+    std::cout << t->title.in(o.lang) << '\n';
+    for (const auto& c : t->columns) std::cout << c.in(o.lang) << " | ";
+    std::cout << '\n';
+    for (const auto& row : t->rows) {
+        for (const auto& cell : row) std::cout << cell.in(o.lang) << " | ";
+        std::cout << '\n';
+    }
+    std::cout << '\n' << t->description.in(o.lang) << '\n';
+    return 0;
+}
+
+int sheet(const Options& o, const std::string& id) {
+    const auto* l = findList(id);
+    if (!l) {
+        std::cerr << "Unbekannt / unknown: " << id << '\n';
+        return 2;
+    }
+    std::vector<Inputs> rows;
+    if (o.args.size() >= 3) {
+        std::string text;
+        if (o.args[2] == "-") {
+            text.assign(std::istreambuf_iterator<char>(std::cin), {});
+        } else {
+            std::ifstream f(o.args[2], std::ios::binary);
+            if (!f) {
+                std::cerr << "Datei nicht lesbar / cannot read: " << o.args[2] << '\n';
+                return 2;
+            }
+            text.assign(std::istreambuf_iterator<char>(f), {});
+        }
+        rows = importTable(*l, text);
+        if (rows.empty()) {
+            std::cerr << "Keine passenden Spalten gefunden / no matching columns\n";
+            return 1;
+        }
+    } else {
+        rows.push_back(defaultRow(*l));
+    }
+    std::cout << exportCsv(*l, rows, defaultSettings(*l), context(o), o.lang, o.detail);
+    return 0;
+}
+
+std::string mdEscape(std::string s) {
+    for (std::size_t p = s.find('|'); p != std::string::npos; p = s.find('|', p + 2)) s.replace(p, 1, "\\|");
+    return s;
+}
+
+/// Markdown reference of all calculators and tables (docs/BERECHNUNGEN.md is generated with this).
+int markdown(const Options& o) {
+    const bool de = o.lang == Lang::De;
+    std::cout << (de ? "# Berechnungen, Formeln & Tabellen\n\n" : "# Calculations, formulas & tables\n\n")
+              << (de ? "> Automatisch erzeugt mit `elcalc markdown` aus dem Rechenkern (Version "
+                     : "> Generated by `elcalc markdown` from the calculation core (version ")
+              << version() << ").\n"
+              << (de ? "> Alle Angaben ohne Gewähr – Normwerte vor Verwendung gegen die gültige Ausgabe prüfen.\n\n"
+                     : "> No warranty – check standard values against the edition in force before use.\n\n");
+    const auto labels = [&](const auto& defs) {
+        for (std::size_t i = 0; i < defs.size(); ++i) {
+            const auto& d = defs[i];
+            std::cout << (i ? ", " : "") << d.label.in(o.lang) << (d.unit.empty() ? "" : " [" + d.unit + "]");
+        }
+        std::cout << "\n\n";
+    };
+    for (const auto& cat : categories()) {
+        std::cout << "## " << cat.title.in(o.lang) << "\n\n";
+        for (const auto& g : categoryGroups(cat.id)) {
+            const bool titled = !g.title.de.empty();
+            if (titled) std::cout << "### " << g.title.in(o.lang) << "\n\n";
+            const std::string h = titled ? "#### " : "### ";
+            for (const auto& id : g.items) {
+                if (const auto* l = findList(id)) {
+                    std::cout << h << l->title.in(o.lang) << "\n\n*" << l->summary.in(o.lang) << "* — `" << l->id << "`\n\n```text\n"
+                              << l->description.in(o.lang) << "\n```\n\n";
+                    std::cout << (de ? "**Projekteinstellungen:** " : "**Project settings:** ");
+                    labels(l->settingsInputs);
+                    std::cout << (de ? "**Spalten je Zeile:** " : "**Columns per row:** ");
+                    labels(l->rowInputs);
+                    std::cout << (de ? "**Ergebnisse je Zeile:** " : "**Results per row:** ");
+                    labels(l->rowOutputs);
+                    std::cout << (de ? "**Summen:** " : "**Totals:** ");
+                    labels(l->totalOutputs);
+                } else if (const auto* c = findCalculator(id)) {
+                    std::cout << h << c->title.in(o.lang) << "\n\n*" << c->summary.in(o.lang) << "* — `" << c->id << "`\n\n```text\n"
+                              << c->description.in(o.lang) << "\n```\n\n"
+                              << (de ? "**Eingaben:** " : "**Inputs:** ");
+                    for (std::size_t i = 0; i < c->inputs.size(); ++i) {
+                        const auto& in = c->inputs[i];
+                        std::cout << (i ? ", " : "") << in.label.in(o.lang) << (in.unit.empty() ? "" : " [" + in.unit + "]");
+                    }
+                    std::cout << "\n\n" << (de ? "**Ergebnisse:** " : "**Results:** ");
+                    for (std::size_t i = 0; i < c->outputs.size(); ++i) {
+                        const auto& out = c->outputs[i];
+                        std::cout << (i ? ", " : "") << out.label.in(o.lang) << (out.unit.empty() ? "" : " [" + out.unit + "]");
+                    }
+                    std::cout << "\n\n";
+                } else if (const auto* t = findTable(id)) {
+                    std::cout << h << t->title.in(o.lang) << "\n\n";
+                    std::cout << '|';
+                    for (const auto& col : t->columns) std::cout << ' ' << mdEscape(col.in(o.lang)) << " |";
+                    std::cout << "\n|";
+                    for (std::size_t i = 0; i < t->columns.size(); ++i) std::cout << "---|";
+                    std::cout << '\n';
+                    for (const auto& r : t->rows) {
+                        std::cout << '|';
+                        for (const auto& cell : r) std::cout << ' ' << mdEscape(cell.in(o.lang)) << " |";
+                        std::cout << '\n';
+                    }
+                    std::cout << "\n*" << t->description.in(o.lang) << "*\n\n";
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const auto o = parse(std::span<char*>(argv, static_cast<std::size_t>(argc)));
+    if (o.args.empty() || o.args[0] == "list") return list(o);
+    if (o.args.size() >= 2 && o.args[0] == "show") return show(o, o.args[1]);
+    if (o.args.size() >= 2 && o.args[0] == "run") return run(o, o.args[1]);
+    if (o.args.size() >= 2 && o.args[0] == "table") return table(o, o.args[1]);
+    if (o.args.size() >= 2 && o.args[0] == "sheet") return sheet(o, o.args[1]);
+    if (o.args[0] == "markdown") return markdown(o);
+    std::cout << "ElektroRechner " << version()
+              << "\nUsage: elcalc list | show <id> | run <id> [key=value ...] | table <id> | sheet <list> [file|-] [--detail]"
+                 " | markdown [--lang de|en] [--norm de|ch] [--currency eur|chf] [--rate 0.92]\n";
+    return 0;
+}

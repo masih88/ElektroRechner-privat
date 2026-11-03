@@ -1,0 +1,123 @@
+#pragma once
+// Small helpers to keep the calculator definitions short and readable.
+
+#include <string>
+#include <vector>
+
+#include "elc/formulas/cables.hpp"
+#include "elc/formulas/common.hpp"
+#include "elc/lists.hpp"
+#include "elc/types.hpp"
+
+namespace elc::catalog {
+
+using Num = InputDef;  // InputDef::number(...)
+using Out = OutputDef;
+
+void addBasics(std::vector<Calculator>& out);
+void addCables(std::vector<Calculator>& out);
+void addMotors(std::vector<Calculator>& out);
+void addIndustry(std::vector<Calculator>& out);
+void addAutomation(std::vector<Calculator>& out);
+void addElectronics(std::vector<Calculator>& out);
+void addConverters(std::vector<Calculator>& out);
+void addHvac(std::vector<Calculator>& out);
+void addCleanroom(std::vector<Calculator>& out);
+void addDatacenter(std::vector<Calculator>& out);
+void addPv(std::vector<Calculator>& out);
+void addTables(std::vector<Table>& out);
+void addCleanroomTables(std::vector<Table>& out);
+void addDatacenterTables(std::vector<Table>& out);
+void addVdiTables(std::vector<Table>& out);
+void addProcess(std::vector<Calculator>& out);
+void addProcessTables(std::vector<Table>& out);
+void addPid(std::vector<Calculator>& out);
+void addPidTables(std::vector<Table>& out);
+void addBuilding(std::vector<Calculator>& out);
+void addBuildingTables(std::vector<Table>& out);
+void addControls(std::vector<Calculator>& out);
+void addControlTables(std::vector<Table>& out);
+void addHydraulics(std::vector<Calculator>& out);
+void addHydraulicTables(std::vector<Table>& out);
+void addElectricalPower(std::vector<Calculator>& out);       // elec_power.cpp
+void addElectricalCables(std::vector<Calculator>& out);      // elec_cables.cpp
+void addElectricalComponents(std::vector<Calculator>& out);  // elec_components.cpp
+void addElectricalMotors(std::vector<Calculator>& out);      // elec_motors.cpp
+void addElectricalUnits(std::vector<Calculator>& out);       // elec_units.cpp
+void addElectricalTables(std::vector<Table>& out);           // elec_tables.cpp
+void addElectricalResources(std::vector<Calculator>& out);   // elec_resources.cpp
+void addElectricalResourceTables(std::vector<Table>& out);   // elec_resources.cpp
+void addPinoutTables(std::vector<Table>& out);               // elec_pinouts.cpp
+std::optional<Chart> tableDrawing(const Table& t);           // pinout_drawings.cpp: picture for a table (or none)
+std::vector<Category> areas();                               // layout.cpp: areas, groups and items of the app
+ListDef consumerList();
+ListDef dataPointList();
+void addMotorFeeder(std::vector<Calculator>& out);           // motor_feeder.cpp
+void addMotorFeederTables(std::vector<Table>& out);
+void addSurge(std::vector<Calculator>& out);                 // surge.cpp
+void addSurgeTables(std::vector<Table>& out);
+void addSurgeApplications(std::vector<Calculator>& out);     // surge_apps.cpp: Ex i loops, induced loop voltage (v1.11)
+void addSurgeApplicationTables(std::vector<Table>& out);     // surge_apps.cpp: DEHN components, data centre, Ex
+ListDef cableTrayList();                                     // lists/cabletray.cpp
+
+
+inline std::vector<Option> systemOptions(bool withDc = true) {
+    std::vector<Option> o;
+    if (withDc) o.push_back({"dc", {"Gleichstrom (DC)", "Direct current (DC)"}});
+    o.push_back({"ac1", {"Wechselstrom 1~", "Single-phase AC"}});
+    o.push_back({"ac3", {"Drehstrom 3~", "Three-phase AC"}});
+    return o;
+}
+
+inline System parseSystem(const std::string& v) {
+    if (v == "dc") return System::DC;
+    if (v == "ac3") return System::AC3;
+    return System::AC1;
+}
+
+inline std::vector<Option> materialOptions() {
+    return {{"cu", {"Kupfer (Cu)", "Copper (Cu)"}}, {"al", {"Aluminium (Al)", "Aluminium (Al)"}}};
+}
+
+inline cables::Material parseMaterial(const std::string& v) {
+    return v == "al" ? cables::Material::Al : cables::Material::Cu;
+}
+
+/// Choice options "1.5", "2.5", … for the given cross-sections
+template <FloatSeries R>
+std::vector<Option> areaOptions(const R& areas) {
+    std::vector<Option> o;
+    for (const double a : areas) {
+        const auto t = formatNumber(a, 2);
+        o.push_back({formatNumber(a, 2, Lang::En), {t.de + " mm²", t.en + " mm²"}});
+    }
+    return o;
+}
+
+inline double parseDouble(const std::string& s) { return parseNumber(s).value_or(kNaN); }
+
+/// "16,3 %" style text for both languages
+inline Text numText(double v, int decimals, const std::string& unit = {}) {
+    auto t = formatNumber(v, decimals);
+    if (!unit.empty()) {
+        t.de += " " + unit;
+        t.en += " " + unit;
+    }
+    return t;
+}
+
+/// Concatenate translated fragments: cat({"a", "b"}, numText(...), ...)
+template <typename... T>
+Text cat(const T&... parts) {
+    Text t{"", ""};
+    ((t.de += Text(parts).de, t.en += Text(parts).en), ...);
+    return t;
+}
+
+inline const InputDef cosPhiInput(double def = 0.9) {
+    return InputDef::number("cosphi", {"Leistungsfaktor cos φ", "Power factor cos φ"}, "", def)
+        .rangeExclusiveMin(0.0, 1.0)
+        .showIf("sys", {"ac1", "ac3"});
+}
+
+}  // namespace elc::catalog

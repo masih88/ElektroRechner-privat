@@ -1,0 +1,44 @@
+# CLAUDE.md – Hinweise für KI-Assistenten
+
+Projekt: ElektroRechner – C++20-Rechenkern (`core/`, ohne Qt) + Qt 6 Quick App (`app/`) für Windows/Android,
+CLI `elcalc` (`cli/`), Catch2-Tests (`tests/`). Architektur: `docs/ARCHITEKTUR.md`.
+
+## Befehle
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DELC_SANITIZE=ON -DELC_BUILD_APP=OFF   # Kern + Tests
+cmake --build build && ./build/tests/elc_tests
+./build/cli/elcalc run <id> key=value ...
+./build/cli/elcalc sheet consumer_list tabelle.txt      # Projektliste aus Excel-Kopie rechnen
+./build/cli/elcalc markdown > docs/BERECHNUNGEN.md && ./build/cli/elcalc markdown --lang en > docs/CALCULATIONS.md
+```
+
+## Regeln
+
+- Neue Rechner datengetrieben in `core/src/catalog/*.cpp`, Formeln als reine Funktionen in `core/src/formulas/`
+  mit Test (Referenzwert aus Norm/Handrechnung). QML nur ändern, wenn sich das Seitenlayout ändern soll.
+- Jeden neuen Rechner/jede Tabelle genau einmal in `catalog/layout.cpp` (Bereich + Gruppe) eintragen – der Bereich wird
+  von dort gesetzt, `c.category` im Quelltext ist nur Vorgabe. Kein Thema doppelt: erst suchen (`elcalc list`), dann
+  bestehenden Rechner erweitern (Auswahl „Gesucht“/„Richtung“) statt einen zweiten anzulegen. Entfernte IDs in
+  `currentItemId()` (`registry.cpp`) auf den Nachfolger zeigen lassen (Favoriten). Zeichnungen mit `catalog/sketch.hpp`.
+- Bilder zu Tabellen (z. B. Steckeransichten) in `catalog/pinout_drawings.cpp` (`tableDrawing`); Pin-Farben aus den
+  Tabellenzeilen ableiten. Steckeransichten nur seitenrichtig zeichnen, wenn die Ansicht belegt ist (Quelle in `note`),
+  sonst als „schematisch“ kennzeichnen.
+- Bilder des Bereichs Überspannungsschutz in `catalog/surge_drawings.cpp`; Text in Bildern nie auf farbige Flächen legen
+  (Tintenfarbe wechselt im Dunkelmodus) – Zonen als farbige Umrisse, Beschriftung auf `bgfill`.
+- Projektlisten (`ListDef`) in `core/src/lists/`; Excel-Spaltennamen als `alias()`; Beispielprojekt in `example`.
+- PDFs/Office-Dateien vor dem Lesen mit `doc2md` (Ordner `Tools/doc2md`) in Markdown umwandeln und gezielt greppen.
+- VDI-/DIN-Dokumente nie ins Repository; nur Codelisten/Strukturen mit Quellenangabe übernehmen.
+- QML: wachsende Listen (`Repeater`) in `Column` statt `ColumnLayout`, umbrechende Texte mit Ankern statt GridLayout
+  (Qt-6.4-Layoutfehler, siehe ARCHITEKTUR.md).
+- QML: `ApplicationWindow.window` nur über ein Item lesen (`tile.ApplicationWindow.window`) – im Kontext eines
+  `TapHandler` ist es null (Fehler in 1.5.0: Kategorie-Kacheln ließen sich nicht öffnen).
+- Kosten-Ausgaben mit Einheit „€“ deklarieren und `currencySymbol(ctx)` verwenden; Preiseingaben mit Einheit `"€ / CHF"`.
+- Sensoren/Wächter für den Kennbuchstaben-Finder in `core/src/instruments/instruments.cpp` ergänzen (Suchwörter in ae/oe/ue).
+- Jeder Text als `Text{de, en}`; deutsche Texte mit korrekten Umlauten. Einheiten als SI-Symbole.
+- Keine locale-abhängigen Funktionen (`printf`, `strtod`, `stod`) – `elc::formatNumber` / `elc::parseNumber` nutzen.
+- Normwerte immer mit Quelle in `description` und „gegen gültige Ausgabe prüfen“; keine Werte raten.
+- Fachbücher liegen beim Benutzer im Ordner `Fachbücher/<Kategorie>/markdown/` (doc2md); dort zuerst suchen. Buchbeispiele
+  als Tests in `tests/test_books.cpp`; ist das Buch veraltet, aktuelle Fassung rechnen und Buchstand nennen.
+- Warnungsfrei bauen (`-Wall -Wextra -Wpedantic -Wshadow`), Tests unter ASan/UBSan grün halten.
+- Nach Änderungen an Rechnern die Doku in `docs/` neu erzeugen.
